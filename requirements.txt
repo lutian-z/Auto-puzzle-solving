@@ -1,0 +1,8 @@
+opencv-python
+numpy
+Pillow
+mss
+pyautogui
+keyboard
+ortools
+scipy
