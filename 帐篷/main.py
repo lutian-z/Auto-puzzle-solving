@@ -20,9 +20,7 @@ import recognizer
 import sat_engine
 import solver
 
-# ----------------------------------------------------------------------
 # 配置(全部写死)
-# ----------------------------------------------------------------------
 CFG = {
     "dark_v": 128,                   # 深色背景预裁的 V 阈值
     "min_cell_px": 12,               # 单元格最小边长, 过小判定非题目
@@ -190,7 +188,7 @@ def run_real(log):
                     return
                 continue
 
-            # ---- 提交前回读校验: 一致或无法回读 → 直接提交;
+            # 提交前回读校验: 一致或无法回读 → 直接提交;
             #      明确检测到棋面与解不一致 → 不提交, 提示后回框选 ----
             time.sleep(0.4)
             placed = None
@@ -218,7 +216,24 @@ def run_real(log):
         stop.cleanup()
 
 
+def _boost_timer():
+    """把 Windows 系统定时器精度提到 1ms(退出时复原)。默认 15.6ms 粒度下
+    time.sleep(0.015) 实际会睡到 15.6~31ms, 逐格点击的毫秒级间隔形同虚设。
+    姊妹项目(马赛克/扫雷)实测结论。非 Windows 或失败时静默跳过。"""
+    import sys
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        if ctypes.windll.winmm.timeBeginPeriod(1) == 0:
+            import atexit
+            atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
+    except Exception:
+        pass
+
+
 def main():
+    _boost_timer()
     run_real(setup_logging())
 
 

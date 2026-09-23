@@ -22,14 +22,12 @@ import solver
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ----------------------------------------------------------------------
 # 配置(全部写死)
-# ----------------------------------------------------------------------
 CFG = {
-    # ---- 路径(相对 BASE_DIR) ----
+    # 路径(相对 BASE_DIR)
     "template_cache": os.path.join(BASE_DIR, "templates.npz"),
 
-    # ---- 图像识别 ----
+    # 图像识别
     "dark_threshold": 128,           # 灰度暗像素阈值(墙体/数字)
     "morph_close_size": 3,           # 墙体闭运算核(失败自动 3/5/7 递增重试)
     "wall_min_frac": 0.01,           # 主墙体组件最小面积占整图比例
@@ -46,10 +44,10 @@ CFG = {
     "template_size": 32,             # 数字模板归一化尺寸
     "use_template_cache": True,      # 模板缓存到固定文件 templates.npz
 
-    # ---- 求解 ----
+    # 求解
     "solve_time_budget": 60.0,       # 单题求解时间预算(秒)
 
-    # ---- 屏幕交互 / 作答 ----
+    # 屏幕交互 / 作答
     "click_interval": 0.012,         # 相邻两次点击间隔(秒)
     "cell_delay": 0.015,             # 每 20 格点击后停顿(秒)
     "jitter": 1.5,                   # 点击位置随机抖动(像素)
@@ -153,7 +151,24 @@ def run_real():
         stop.cleanup()
 
 
+def _boost_timer():
+    """把 Windows 系统定时器精度提到 1ms(退出时复原)。默认 15.6ms 粒度下
+    time.sleep(0.015) 实际会睡到 15.6~31ms, 逐格点击的毫秒级间隔形同虚设。
+    姊妹项目(马赛克/扫雷)实测结论。非 Windows 或失败时静默跳过。"""
+    import sys
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        if ctypes.windll.winmm.timeBeginPeriod(1) == 0:
+            import atexit
+            atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
+    except Exception:
+        pass
+
+
 def main():
+    _boost_timer()
     run_real()
 
 

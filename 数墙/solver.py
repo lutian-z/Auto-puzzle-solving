@@ -110,7 +110,7 @@ class _Solver:
         if time.time() - self.t0 > self.time_budget:
             raise Timeout()
 
-    # ---------------- 洪泛工具(列表栈实现, 热路径) ----------------
+    # 洪泛工具(列表栈实现, 热路径)
     def _flood_white(self, start):
         """仅经白格洪泛, 返回格编号列表(含 start)."""
         st = self.state
@@ -192,7 +192,7 @@ class _Solver:
                     stack.append(j)
         return out
 
-    # ---------------- 传播 ----------------
+    # 传播
     def _propagate(self):
         """约束传播到不动点. 返回 (True, 岛摘要) 或 (False, None).
 
@@ -201,7 +201,7 @@ class _Solver:
         """
         while True:
             changed = False
-            # ---- Phase A: 逐岛 P1 推断(用当下状态现算) ----
+            # Phase A: 逐岛 P1 推断(用当下状态现算)
             for num_i, target in self.num_order:
                 if self.state[num_i] != WHITE:
                     return (False, None)               # 规则1被破坏
@@ -241,7 +241,7 @@ class _Solver:
                     # 唯一生长点: 必白
                     self.state[frontier[0]] = WHITE
                     changed = True
-            # ---- Phase B: 用 P1 后的新状态重算 pot, 供 P2/P3 ----
+            # Phase B: 用 P1 后的新状态重算 pot, 供 P2/P3
             island_whites = []
             all_potential = set()
             for num_i, target in self.num_order:
@@ -620,7 +620,7 @@ class _Solver:
                 return False
         return True
 
-    # ---------------- 回溯 ----------------
+    # 回溯
     def _search(self):
         self._check_timeout()
         self.nodes += 1
@@ -749,9 +749,7 @@ class _Solver:
                  else False for c in range(self.b)] for r in range(self.a)]
 
 
-# ----------------------------------------------------------------------
 # 独立校验
-# ----------------------------------------------------------------------
 
 def verify_shape(shape, nums, grid):
     """独立校验解是否满足全部四条规则. 返回 (ok, 错误列表)."""

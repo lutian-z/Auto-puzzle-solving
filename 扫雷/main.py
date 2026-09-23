@@ -34,7 +34,7 @@ CONFIG = {
     "scroll_up_amount": 30,      # 向上滚轮的格数
     "scroll_settle": 0.15,       # 滚动后等待截图稳定(浏览器渲染新位置)
     "fill_recheck_settle": 0.25, # 回填定位失败时原地重截等待
-    "click_interval": 0.015,     # 连续右键标记之间的间隔
+    "click_interval": 0.006,     # 连续右键标记间隔(快速路径+1ms定时精度后有效)
     "jitter": 1.5,               # 点击抖动像素(避免点到网格线上)
     "max_no_progress": 3,        # 连续无进展判定到底
     "max_bad_screens": 3,        # 连续低质量整屏上限, 超过即安全终止
@@ -85,7 +85,7 @@ def _main_impl():
         print("[错误] 截屏区域无效")
         return
 
-    # ---------- 识别 ----------
+    # 识别
     if mode == "box":
         print("\n[阶段1/4] 框选单屏识别(全程不滚动)...")
         st = ma.recognize_visible_board(bbox, STOP, cfg)
@@ -135,7 +135,7 @@ def _main_impl():
         print("[中断] 已停止")
         return
 
-    # ---------- 求解 ----------
+    # 求解
     print("\n[阶段2/4] 求解...")
     try:
         result = ms.solve_board(st.board, verbose=True,
@@ -161,7 +161,7 @@ def _main_impl():
         print("[中断] 已停止")
         return
 
-    # ---------- 回填 ----------
+    # 回填
     if mode == "box":
         print(f"\n[阶段3/4] 框内直接插旗(全程不滚动)...")
         filled = ma.fill_visible_board(st, bbox, STOP, cfg, mine_cells)
@@ -174,7 +174,7 @@ def _main_impl():
               "不提交")
         return
 
-    # ---------- 兜底提交 ----------
+    # 兜底提交
     if not STOP.stopped:
         print("\n[阶段4/4] 提交...")
         time.sleep(0.3)

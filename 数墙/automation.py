@@ -75,8 +75,9 @@ def _physical_scaling():
         tk_w = root.winfo_screenwidth()
         tk_h = root.winfo_screenheight()
         with mss.MSS() as sct:
-            phys_w = sct.monitors[0]["width"]
-            phys_h = sct.monitors[0]["height"]
+            _mon = (sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0])
+            phys_w = _mon["width"]
+            phys_h = _mon["height"]
         sx = (phys_w / tk_w) if tk_w else 1.0
         sy = (phys_h / tk_h) if tk_h else 1.0
     except Exception:
@@ -179,18 +180,89 @@ def grab_screen(bbox):
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
-def fill_answer(puzzle, grid, bbox_origin, cfg, stop=None):
-    """把解涂到屏幕: 只点击解中为黑的格子(数字格/白格不点).
-
-    puzzle: recognizer.Puzzle(centers 为相对识别输入图的坐标);
-    grid  : solver 的 a×b 布尔矩阵(True=黑);
-    bbox_origin: 框选区域左上角(物理像素), 识别图 = 该区域的截图.
-    返回点击格数; stop(StopFlag) 置位时抛出 StopRequested.
+def _win_click_env():
+    """Windows ctypes 快速点击: SetCursorPos+SendInput 直发事件
+    (<0.5ms, 对比 pyautogui 每次 10~20ms 封装), 顺带把系统定时器提到
+    1ms 精度. 返回 (click, screen, cleanup). 非 Windows 不可达.
     """
+    import ctypes
+
+    ULONG = ctypes.c_ulong
+    LONG = ctypes.c_long
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", LONG), ("dy", LONG), ("mouseData", ULONG),
+                    ("dwFlags", ULONG), ("time", ULONG),
+                    ("dwExtraInfo", ctypes.c_void_p)]
+
+    class _INPUTunion(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ULONG), ("union", _INPUTunion)]
+
+    user32 = ctypes.windll.user32
+    winmm = ctypes.windll.winmm
+    timer_set = False
+    try:
+        timer_set = (winmm.timeBeginPeriod(1) == 0)
+    except Exception:
+        pass
+
+    inputs = (INPUT * 2)()
+    inputs[0].type = 0                        # INPUT_MOUSE
+    inputs[0].union.mi = MOUSEINPUT(0, 0, 0, 0x0002, 0, None)   # LEFTDOWN
+    inputs[1].type = 0
+    inputs[1].union.mi = MOUSEINPUT(0, 0, 0, 0x0004, 0, None)   # LEFTUP
+
+    def click(x, y):
+        if not user32.SetCursorPos(int(x), int(y)):
+            raise RuntimeError(f"鼠标定位失败: ({x},{y})")
+        if user32.SendInput(2, inputs, ctypes.sizeof(INPUT)) != 2:
+            raise RuntimeError(f"鼠标事件发送失败: ({x},{y})")
+
+    screen = (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+
+    def cleanup():
+        if timer_set:
+            try:
+                winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+
+    return click, screen, cleanup
+
+
+def _pyautogui_click_env():
+    """pyautogui 点击环境(非 Windows / 快速路径不可用时的回退)."""
     import pyautogui
     pyautogui.PAUSE = 0.0
     pyautogui.MINIMUM_DURATION = 0.0
     pyautogui.MINIMUM_SLEEP = 0.0
+    wh = pyautogui.size()
+
+    def click(x, y):
+        pyautogui.click(int(x), int(y))       # 坐标瞬移点击(无移动动画)
+
+    def cleanup():
+        pass
+
+    return click, wh, cleanup
+
+
+def fill_answer(puzzle, grid, bbox_origin, cfg, stop=None):
+    """只点击解中为黑的格子(数字格/白格不点), 坐标为 puzzle.centers+bbox_origin.
+
+    返回点击格数; stop 置位抛 StopRequested.
+    """
+    if IS_WINDOWS:
+        try:
+            click, screen, cleanup = _win_click_env()
+        except Exception:
+            click, screen, cleanup = _pyautogui_click_env()
+    else:
+        click, screen, cleanup = _pyautogui_click_env()
+    screen_w, screen_h = screen
 
     ox, oy = bbox_origin
     jitter = cfg.get("jitter", 1.5)
@@ -198,21 +270,27 @@ def fill_answer(puzzle, grid, bbox_origin, cfg, stop=None):
     cell_delay = cfg.get("cell_delay", 0.015)
 
     clicked = 0
-    for (r, c), (cx, cy) in sorted(puzzle.centers.items()):
-        if stop is not None and stop.stopped:
-            raise StopRequested()
-        if r >= len(grid) or c >= len(grid[0]) or not grid[r][c]:
-            continue
-        jx = random.uniform(-jitter, jitter)
-        jy = random.uniform(-jitter, jitter)
-        tx, ty = int(round(ox + cx + jx)), int(round(oy + cy + jy))
-        # 坐标瞬移点击(无移动动画)
-        pyautogui.click(tx, ty)
-        clicked += 1
-        time.sleep(click_interval)
-        if clicked % 20 == 0:
-            time.sleep(cell_delay)
-    time.sleep(cell_delay)
+    try:
+        for (r, c), (cx, cy) in sorted(puzzle.centers.items()):
+            if stop is not None and stop.stopped:
+                raise StopRequested()
+            if r >= len(grid) or c >= len(grid[0]) or not grid[r][c]:
+                continue
+            jx = random.uniform(-jitter, jitter)
+            jy = random.uniform(-jitter, jitter)
+            tx, ty = int(round(ox + cx + jx)), int(round(oy + cy + jy))
+            if not (0 <= tx <= screen_w and 0 <= ty <= screen_h):
+                raise RuntimeError(
+                    f"点击坐标越界: ({tx},{ty}), 请确认题目完整显示在屏幕上")
+            # 坐标瞬移点击(无移动动画)
+            click(tx, ty)
+            clicked += 1
+            time.sleep(click_interval)
+            if clicked % 20 == 0:
+                time.sleep(cell_delay)
+        time.sleep(cell_delay)
+    finally:
+        cleanup()
     return clicked
 
 

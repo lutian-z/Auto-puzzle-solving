@@ -92,7 +92,7 @@ def _build_model(ctx):
     n = ctx.n
     b = [m.NewBoolVar(f"b{i}") for i in range(n)]
     pot_of = {}
-    # ---------------- 岛约束 ----------------
+    # 岛约束
     for ki, (num_i, target, pot, dist) in enumerate(ctx.pots):
         idv = {v: m.NewBoolVar(f"id{ki}_{v}") for v in pot}
         m.Add(b[num_i] == 0)                    # 数字格必白
@@ -170,7 +170,7 @@ def _build_model(ctx):
                 else:
                     m.AddBoolOr(not_both_white + [iv.Not(), iu])
                     m.AddBoolOr(not_both_white + [iv, iu.Not()])
-    # ---------------- 海连通(单商品流, 根可选) ----------------
+    # 海连通(单商品流, 根可选)
     # 恰选一个黑格作"海根"; depot 只给根直接供流; 每个黑格消耗 1 单位,
     # 流量只能经黑格. 于是所有黑格都能从根经黑格路径到达 → 黑海连通,
     # 精确且健全. (若 depot 直连所有黑格, 任意布局都满足守恒, 约束失效.)
@@ -204,7 +204,7 @@ def _build_model(ctx):
     # 冗余但强传播: 总海格数 = 总格数 − Σ 岛面积; 且海至少 1 格
     m.Add(sum(b) == n - sum(t for (_ni, t, _p, _d) in ctx.pots))
     m.Add(sum(b) >= 1)
-    # ---------------- 2×2 全黑禁止 ----------------
+    # 2×2 全黑禁止
     for r in range(ctx.a - 1):
         for c in range(ctx.b - 1):
             q = [ctx.idx[r][c], ctx.idx[r][c + 1],
@@ -212,7 +212,7 @@ def _build_model(ctx):
             if any(x < 0 for x in q):
                 continue
             m.AddBoolOr([b[x].Not() for x in q])
-    # ---------------- 海的必要条件(声音, 松弛/精确两用) ----------------
+    # 海的必要条件(声音, 松弛/精确两用)
     # 海连通且 |海|≥2 时, 每个黑格必有至少一个黑邻居(连通块≥2 的节点
     # 必有块内邻居); |海|≤1 时自动成立. 大幅减少松弛解里"孤立黑点"型
     # 碎海, 让提示解更接近真解.

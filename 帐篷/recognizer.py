@@ -41,9 +41,7 @@ TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 _TPL_CACHE = None     # 模块级缓存, 避免每次识别重复读盘
 
 
-# ----------------------------------------------------------------------
 # 异常(任务书 第六步)
-# ----------------------------------------------------------------------
 
 class RecognitionError(solver.TentsError):
     """识别失败(可重试), 带用户可读信息."""
@@ -53,9 +51,7 @@ class GridGeometryError(RecognitionError):
     """网格几何异常(非正方形/间距不均/规模异常等)."""
 
 
-# ----------------------------------------------------------------------
 # 数字模板(预渲染数据文件, 与代码同目录分发)
-# ----------------------------------------------------------------------
 
 def _load_templates():
     """从 templates.npz 加载 0-9 数字模板 {digit: [float32 掩码]}.
@@ -148,9 +144,7 @@ class DigitClassifier:
         return best_d, best_s, best_s - second
 
 
-# ----------------------------------------------------------------------
 # 基础掩码与版面分析
-# ----------------------------------------------------------------------
 
 def _bg_level_v(hsv):
     """估计背景亮度: 中性像素(S<60) V 值的 90 分位."""
@@ -188,10 +182,13 @@ def _largest_component(mask):
     (6.png+椒盐1% 实测 bbox 左界 38→13). 网格线主体面积远大于阈值.
     """
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    clean = mask.copy()
-    for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] < 6:
-            clean[labels == i] = 0
+    # 查表一次性清零小组件(旧实现逐组件做全图 labels==i 比较, 椒盐噪声
+    # 下组件数可达数千 → O(组件数×W×H), 是实测最大热点; 输出与旧版逐
+    # 比特一致, 与马赛克项目 9/1 优化同构)
+    keep = np.ones(n, dtype=bool)
+    if n > 1:
+        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= 6
+    clean = np.where(keep[labels], mask, 0).astype(mask.dtype)
     closed = cv2.morphologyEx(
         clean, cv2.MORPH_CLOSE,
         cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
@@ -289,9 +286,7 @@ def _crop_dark_border(hsv, cfg):
     return hsv[y:y + bh, x:x + bw], (x, y)
 
 
-# ----------------------------------------------------------------------
 # 网格线提取(投影法)
-# ----------------------------------------------------------------------
 
 def _line_segs(proj, thr):
     """投影超阈值的连续峰段. 返回 [(start, end, 加权重心)]."""
@@ -363,9 +358,7 @@ def _grid_lines(wall, cfg):
     return vsegs, hsegs, cell
 
 
-# ----------------------------------------------------------------------
 # 树识别
-# ----------------------------------------------------------------------
 
 def _canopy_mask(hsv):
     """树冠掩码: 绿色高饱和 (H 35~85, S≥140, V≥120)."""
@@ -413,9 +406,7 @@ def _detect_trees(hsv_crop, hlines, vlines, cfg, warnings):
     return trees, existing
 
 
-# ----------------------------------------------------------------------
 # 数字带识别
-# ----------------------------------------------------------------------
 
 def _band_ink(gray, hsv, rect):
     """数字带的两种墨迹掩码(宽松/严格) + 中值去噪. 返回 (loose, tight, w, h).
@@ -637,9 +628,7 @@ def _read_side(gray, hsv, side, board, cell, lines, n, clf, cfg, warnings):
     return out
 
 
-# ----------------------------------------------------------------------
 # 主入口
-# ----------------------------------------------------------------------
 
 class Puzzle:
     """识别结果: 题目结构 + 几何."""
@@ -677,13 +666,13 @@ def recognize(img, cfg, log):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     h0, w0 = hsv.shape[:2]
 
-    # ---- 1) 黑边预裁 ----
+    # 1) 黑边预裁
     hsv, (off_x, off_y) = _crop_dark_border(hsv, cfg)
     if off_x or off_y:
         warnings.append("检测到四周深色边框, 已自动裁剪到纸面区域")
     h1, w1 = hsv.shape[:2]
 
-    # ---- 2) 去倾斜(迭代≤2轮: Hough 角度量化 0.25°, 大棋盘上残留会
+    # 2) 去倾斜(迭代≤2轮: Hough 角度量化 0.25°, 大棋盘上残留会
     #      漂移投影; 多次重采样损失字形精度, 轮数须受限) ----
     rot_ang = 0.0
     gray1 = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
@@ -709,7 +698,7 @@ def recognize(img, cfg, log):
             f"请摆正窗口后重新框选")
     h2, w2 = gray1.shape[:2]
 
-    # ---- 3) 定位棋盘 + 尺度归一化 ----
+    # 3) 定位棋盘 + 尺度归一化
     wall, board = _find_board(hsv, cfg)
     cell0 = _estimate_cell(wall, board)
     scale = 1.0
@@ -728,7 +717,7 @@ def recognize(img, cfg, log):
             f"单元格 {cell0:.0f}px 偏{'小' if scale > 1 else '大'}, "
             f"已按 {scale:.2f}x 归一化尺度")
 
-    # ---- 4) 网格线 ----
+    # 4) 网格线
     vsegs, hsegs, cell = _grid_lines(wall, cfg)
     n = len(vsegs) - 1
     if not (1 <= n <= int(cfg["max_board"])):
@@ -744,7 +733,7 @@ def recognize(img, cfg, log):
         warnings.append(
             f"网格线位置残差偏大(x={res_x:.1f}, y={res_y:.1f}px), 已按等差规整")
 
-    # ---- 5) 树识别(顺带检测残留帐篷) ----
+    # 5) 树识别(顺带检测残留帐篷)
     bx0, by0, bx1, by1 = board
     hsv_crop = hsv[by0:by1, bx0:bx1]
     # 线段坐标转换到 board 裁剪系
@@ -757,7 +746,7 @@ def recognize(img, cfg, log):
             f"棋盘上检测到 {len(existing)} 个残留帐篷(非题目内容), "
             f"作答前将自动清除")
 
-    # ---- 6) 数字识别(按槽位) ----
+    # 6) 数字识别(按槽位)
     clf = DigitClassifier(_load_templates())
     side_data = {}
     for side in ("top", "bottom", "left", "right"):
@@ -792,7 +781,7 @@ def recognize(img, cfg, log):
                     f"{name}约束 {name}{i + 1}={v} 超出网格规模 {n}, "
                     f"数字识别可能有误")
 
-    # ---- 7) 一致性校验 ----
+    # 7) 一致性校验
     n_trees = len(trees)
     if all(v is not None for v in row_ct) and \
             sum(row_ct) != n_trees:
@@ -803,20 +792,20 @@ def recognize(img, cfg, log):
         raise RecognitionError(
             f"列约束之和({sum(col_ct)}) != 树数({n_trees}), 数字识别可能有误")
 
-    # ---- 坐标回溯映射到输入图 ----
+    # 坐标回溯映射到输入图
     # 格线/格中心的坐标是"墙裁剪坐标系"(裁剪原点=棋盘外接框左上角),
     # 输出的 centers/board_origin 必须加回裁剪原点映射到输入图坐标系!
     # (曾遗漏导致所有点击整体左上偏移约一格 — 实机作答全面错位的根因;
     # 数墙原实现是 rows_y[r]+origin[1], 重写投影法时丢失了这一步。)
-    # 注意旋转分支的方向: warpAffine(dst, M) 满足 dst(x,y) =
-    # src(M11x+M12y+M13, ...), 即 p_src = M · p_dst (OpenCV 文档),
-    # 因此从识别坐标系(转正后)回原图要用与 _rotate_gray 相同角度的
-    # 正向矩阵, 不能取逆。
+    # 旋转分支方向(实测往返验证): warpAffine(gray, getRotationMatrix2D
+    # (c, θ)) 的内容移动是 q = M(θ)·p, 因此"转正图→原图"要用 M(-θ)。
+    # 旧注释引用文档公式 dst(x,y)=src(Mx) 推出"不能取逆"是符号方向理解
+    # 反了, 会把偏差翻倍(3° 时约 38px); 该分支仅在 ≥0.7° 倾斜时执行。
     def to_input(x, y):
         if scale != 1.0:
             x, y = x / scale, y / scale
         if rot_ang:
-            a = np.deg2rad(rot_ang)
+            a = -np.deg2rad(rot_ang)
             ca, sa = np.cos(a), np.sin(a)
             cx, cy = w2 / 2.0, h2 / 2.0
             nx = ca * x + sa * y + (1 - ca) * cx - sa * cy

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""recognizer.py — 数墙题目图像识别(版面分析/网格提取/形状参数化/数字识别).
+"""recognizer.py — 数墙题目图像识别(版面分析/网格提取/任意形状直通/数字识别).
 
 输入一张截图(用户粗框选区域, 无需像素级精确), 输出结构化棋盘:
     Puzzle: a×b 存在矩阵(shape) + 数字字典(nums) + 每格中心像素坐标.
@@ -9,7 +9,7 @@
        墙体外接框即为题目真实边界(异形题自动贴合).
     2. 墙体补集的连通域 = 各存在格的内部区域(数字墨迹不属于墙体, 归入内部);
        用内部组件质心聚类出所有行/列 → a、b 与每格几何, 顺带得到形状.
-    3. 形状用 solver.shape_params 参数化为通用形式 a×b-四角c×d-中间e×f.
+    3. 存在矩阵直通求解与作答, 任意形状无需模板 (shape_params 仅作描述).
     4. 每个存在格: 内部 Otsu → 连通域 → 按水平序分组字形 → 归一化后
        与多字体渲染的 0-9 模板做相关性/IoU 匹配 → 1~3 位数逐位识别.
     5. 低置信度/模糊匹配打印 WARN; 整体失败抛 RecognizeError(入口层给出重试提示).
@@ -31,9 +31,7 @@ class RecognizeError(Exception):
     """识别失败(可重试), 带用户可读信息."""
 
 
-# ----------------------------------------------------------------------
 # 字体探测与数字模板
-# ----------------------------------------------------------------------
 
 def _font_candidates():
     """跨平台等宽无衬线粗体/常规体候选, 全部经环境锚点动态探测."""
@@ -195,9 +193,7 @@ class DigitClassifier:
         return best_d, best_s, best_s - second
 
 
-# ----------------------------------------------------------------------
 # 版面分析
-# ----------------------------------------------------------------------
 
 def _largest_components(mask, keep=4):
     """返回掩码中最大的 keep 个连通域(按面积降序)的布尔掩码列表."""
@@ -213,8 +209,26 @@ def _largest_components(mask, keep=4):
 
 
 def _wall_and_crop(gray, cfg):
-    """找墙体组件并裁到其外接框(留 2px 边). 返回 (crop_gray, wall, (x0,y0))."""
-    dark = (gray < int(cfg["dark_threshold"])).astype(np.uint8)
+    """找墙体组件并裁到其外接框(留 2px 边). 返回 (crop_gray, wall, (x0,y0)).
+
+    主阈值失败时自动用"格体众数×0.87"的相对阈值重试一次(救浏览器小数
+    缩放下被反锯齿抬亮的网格线); 仍失败则报原始错误.
+    """
+    try:
+        return _wall_and_crop_thr(gray, cfg, int(cfg["dark_threshold"]))
+    except RecognizeError as err0:
+        body = int(np.argmax(np.bincount(np.asarray(gray).ravel())))
+        thr_rel = max(int(cfg["dark_threshold"]), min(240, int(body * 0.87)))
+        if thr_rel == int(cfg["dark_threshold"]):
+            raise err0
+        try:
+            return _wall_and_crop_thr(gray, cfg, thr_rel)
+        except RecognizeError:
+            raise err0
+
+
+def _wall_and_crop_thr(gray, cfg, dark_thr):
+    dark = (gray < dark_thr).astype(np.uint8)
     k = max(1, int(cfg["morph_close_size"]))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     closed = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -400,9 +414,28 @@ def _assign_cells(comps, rows_y, cols_x):
     return grid, conflict
 
 
-# ----------------------------------------------------------------------
+def _shape_connected(exist):
+    """存在格四邻域是否彼此连通(空盘视为不连通, 由上游保证不会发生)."""
+    a = len(exist)
+    b = len(exist[0]) if a else 0
+    total = sum(sum(1 for v in row if v) for row in exist)
+    if total == 0:
+        return False
+    start = next((r, c) for r in range(a) for c in range(b) if exist[r][c])
+    seen = {start}
+    stack = [start]
+    while stack:
+        r, c = stack.pop()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            p = (r + dr, c + dc)
+            if (0 <= p[0] < a and 0 <= p[1] < b and exist[p[0]][p[1]]
+                    and p not in seen):
+                seen.add(p)
+                stack.append(p)
+    return len(seen) == total
+
+
 # 字形提取与数值识别
-# ----------------------------------------------------------------------
 
 def _cell_glyphs(cell_gray, cfg, wall_patch=None):
     """从单元格内部图提取字形掩码列表(按从左到右排序). 无数字返回 [].
@@ -502,9 +535,7 @@ def _read_cell_value(cell_gray, clf, cfg, where, wall_patch=None):
     return value, float(min(confs)) if confs else 0.0, low
 
 
-# ----------------------------------------------------------------------
 # 主入口
-# ----------------------------------------------------------------------
 
 class Puzzle:
     """识别结果: 形状 + 数字 + 几何."""
@@ -519,10 +550,14 @@ class Puzzle:
         self.cell_w = cell_w
         self.cell_h = cell_h
         self.crop_origin = crop_origin  # 墙体外接框在输入图中的左上角
-        self.params = params            # solver.shape_params 结果
+        self.params = params            # solver.shape_params 结果(自由形状为 None)
         self.warnings = warnings
 
     def describe(self):
+        if self.params is None:
+            n = sum(sum(1 for v in row if v) for row in self.shape)
+            return (f"{self.a}x{self.b}, 自由形状(存在 {n} 格), "
+                    f"{len(self.nums)} 个数字")
         a, b, corners, middle = self.params
         cdesc = "/".join(f"{r}x{c}" for (r, c) in corners)
         mdesc = "-" if middle is None else (
@@ -567,7 +602,7 @@ def recognize(img, cfg, clf=None):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     warnings = []
 
-    # ---- 1) 黑边预裁 ----
+    # 1) 黑边预裁
     h0, w0 = gray.shape
     off_x = off_y = 0
     gray_c = _crop_dark_border(gray, cfg)
@@ -581,7 +616,7 @@ def recognize(img, cfg, clf=None):
         gray = gray_c
     h1, w1 = gray.shape
 
-    # ---- 2) 去倾斜(一次性, 方向自动校正) ----
+    # 2) 去倾斜(一次性, 方向自动校正)
     # 轻微倾斜(< skew_warn_deg)由轴对齐拟合天然容忍, 不旋转以免插值
     # 损伤字形; 达到告警阈值才转正.
     rot_ang = 0.0
@@ -603,7 +638,7 @@ def recognize(img, cfg, clf=None):
         gray = gray_try
         warnings.append(f"题目存在 {abs(rot_ang):.1f}° 倾斜, 已自动转正")
 
-    # ---- 3) 尺度归一化(保守: 仅明显过小/过大才触发, 原生尺度附近
+    # 3) 尺度归一化(保守: 仅明显过小/过大才触发, 原生尺度附近
     #      不动, 以免插值与阈值漂移引入识别抖动) ----
     scale = 1.0
     try:
@@ -639,13 +674,14 @@ def recognize(img, cfg, clf=None):
     if puz is None:
         raise last_err
 
-    # ---- 坐标回溯映射: 处理坐标系 → 原输入图坐标系 ----
+    # 坐标回溯映射: 处理坐标系 → 原输入图坐标系
     def to_input(x, y):
         if scale != 1.0:
             x, y = x / scale, y / scale
         if rot_ang:
-            # 逆旋转(绕 gray1 中心)
-            a = -np.deg2rad(rot_ang)
+            # 逆旋转: 此处括号形 [ca,-sa; sa,ca] 与 M(θ)=[c,s;-s,c] 相反,
+            # 取逆须 a=+deg2rad(rot_ang)
+            a = np.deg2rad(rot_ang)
             ca, sa = np.cos(a), np.sin(a)
             cx, cy = w1 / 2.0, h1 / 2.0
             dx, dy = x - cx, y - cy
@@ -683,12 +719,12 @@ def _recognize_once(gray, cfg, clf, warnings):
         warnings.append(f"{conflict} 个格子内部被分割(数字可能贴线), 已合并处理")
     print(f"[识别] 版面: {a} 行 x {b} 列, 格约 {step_x:.1f}x{step_y:.1f}px")
 
-    # 形状参数化(通用形式校验)
-    params = solver.shape_params(exist)
-    if params is None:
+    # 存在矩阵直通求解与作答(任意形状); 不连通的海必无解, 多为框选漏格
+    if not _shape_connected(exist):
         raise RecognizeError(
-            "题目形状不符合'矩形-四角裁剪-中间裁剪'的通用形式, "
-            "请确认框选完整且未混入无关内容")
+            "题目存在格彼此不连通(有独立抠出的区域), 海无法连通必无解; "
+            "请确认框选完整包含了整座题目的所有格子")
+    params = solver.shape_params(exist)
 
     # 数字识别
     if clf is None:

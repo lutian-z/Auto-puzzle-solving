@@ -29,9 +29,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_NPZ_PATH = os.path.join(BASE_DIR, "templates.npz")
 TEMPLATE_SIZE = 28
 
-# ======================================================================
 # 数字模板(随项目分发的数据文件)
-# ======================================================================
 
 def extract_glyph(ink):
     """把二值墨迹归一化到 TEMPLATE_SIZE×TEMPLATE_SIZE, 返回 float32 掩码."""
@@ -73,9 +71,7 @@ def match_digit(glyph, templates):
     return best_d, best_s
 
 
-# ======================================================================
 # 几何检测: 定位棋盘格线、n、格子中心
-# ======================================================================
 
 def _line_positions(proj, thr):
     """投影数组上取超过阈值的连续段中心."""
@@ -95,14 +91,23 @@ def _line_positions(proj, thr):
 
 
 def detect_bands(gray):
-    """检测棋盘格线(双线风格或单线风格).
+    """检测棋盘格线(双线风格或单线风格). 先按主阈值 128, 失败再按
+    "格体/背景众数×0.87"的相对阈值兜底一次(浏览器小数缩放会把 1px 线
+    反锯齿抬亮到 130~180, 绝对 128 整题失败; 主路径行为完全不变)。"""
+    med = float(np.median(gray))
+    body = int(np.argmax(np.bincount(np.asarray(gray).ravel())))
+    thr_rel = max(128, min(240, int(body * 0.87), int(med * 0.92)))
+    for thr in ((128,) if thr_rel <= 128 else (128, thr_rel)):
+        res = _detect_bands_thr(gray, thr)
+        if res is not None:
+            return res
+    return None
 
-    返回 (n, centers, starts, ends, horizontal):
-      centers/starts/ends 为数组, 均沿水平方向; horizontal 指示是沿行(水平线)还是列.
-    失败返回 None.
-    """
+
+def _detect_bands_thr(gray, dark_thr):
+    """detect_bands 的单阈值实现; dark_thr 为"多暗算格线"的灰度上限."""
     h, w = gray.shape
-    dark = (gray < 128).astype(np.uint8)
+    dark = (gray < dark_thr).astype(np.uint8)
     v_counts = dark.sum(axis=0)   # 每列暗像素数 → 竖直格线
     h_counts = dark.sum(axis=1)   # 每行暗像素数 → 水平格线
     v_thr = max(40, h * 0.4)
@@ -233,9 +238,7 @@ def _extract_digit(gray_patch):
     return extract_glyph(best)
 
 
-# ======================================================================
 # 识别一道题
-# ======================================================================
 
 def recognize_puzzle(img, templates):
     """识别一整道高楼题. 返回 (n, top, bottom, left, right, given, det) 或 None.
@@ -317,9 +320,7 @@ def print_puzzle(n, top, bottom, left, right, given):
     print("   " + " ".join(fmt(b) for b in bottom))
 
 
-# ======================================================================
 # 数字模板加载(templates.npz 与代码同目录分发)
-# ======================================================================
 
 def build_templates():
     """加载随项目分发的数字模板 templates.npz. 返回 {digit: 28x28 bool 掩码}.
@@ -342,9 +343,7 @@ def build_templates():
         "位于同一目录且内容完整")
 
 
-# ======================================================================
 # 框选 / 截图 / 键鼠
-# ======================================================================
 
 def set_dpi_aware():
     if IS_WINDOWS:
@@ -365,8 +364,9 @@ def _physical_scaling():
         tk_w = root.winfo_screenwidth()
         tk_h = root.winfo_screenheight()
         with mss.MSS() as sct:
-            phys_w = sct.monitors[0]["width"]
-            phys_h = sct.monitors[0]["height"]
+            _mon = (sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0])
+            phys_w = _mon["width"]
+            phys_h = _mon["height"]
         sx = (phys_w / tk_w) if tk_w else 1.0
         sy = (phys_h / tk_h) if tk_h else 1.0
     except Exception:
@@ -471,36 +471,140 @@ def compute_cell_centers(n, c_v, c_h, offset):
              for c in range(n)] for r in range(n)]
 
 
-def fill_board(solution, centers, given):
-    """点击+键入填数, 跳过初值格. 返回填入格数."""
+def _win_click_press_env():
+    """Windows ctypes 快速点击+键入(SetCursorPos+SendInput, <0.5ms/次,
+    对比 pyautogui 每次 10~20ms 封装), 定时器提到 1ms 精度.
+    press() 单键按 VK 直发, 不支持的字符回退 pyautogui.press.
+    返回 (click, press, cleanup).
+    """
+    import ctypes
+
+    ULONG = ctypes.c_ulong
+    USHORT = ctypes.c_ushort
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                    ("mouseData", ULONG), ("dwFlags", ULONG),
+                    ("time", ULONG), ("dwExtraInfo", ctypes.c_void_p)]
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", USHORT), ("wScan", USHORT), ("dwFlags", ULONG),
+                    ("time", ULONG), ("dwExtraInfo", ctypes.c_void_p)]
+
+    class _U(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ULONG), ("u", _U)]
+
+    user32 = ctypes.windll.user32
+    winmm = ctypes.windll.winmm
+    timer_set = False
+    try:
+        timer_set = (winmm.timeBeginPeriod(1) == 0)
+    except Exception:
+        pass
+
+    minputs = (INPUT * 2)()
+    minputs[0].type = 0
+    minputs[0].u.mi = MOUSEINPUT(0, 0, 0, 0x0002, 0, None)     # LEFTDOWN
+    minputs[1].type = 0
+    minputs[1].u.mi = MOUSEINPUT(0, 0, 0, 0x0004, 0, None)     # LEFTUP
+
+    def click(x, y):
+        if not user32.SetCursorPos(int(x), int(y)):
+            raise RuntimeError(f"鼠标定位失败: ({x},{y})")
+        if user32.SendInput(2, minputs, ctypes.sizeof(INPUT)) != 2:
+            raise RuntimeError(f"鼠标事件发送失败: ({x},{y})")
+
+    _VK = {str(d): 0x30 + d for d in range(10)}
+    _vk_cache = {}
+
+    def _key_pair(vk):
+        pair = _vk_cache.get(vk)
+        if pair is None:
+            pair = (INPUT * 2)()
+            pair[0].type = 1                                   # INPUT_KEYBOARD
+            pair[0].u.ki = KEYBDINPUT(vk, 0, 0, 0, None)       # KEYDOWN
+            pair[1].type = 1
+            pair[1].u.ki = KEYBDINPUT(vk, 0, 0x0002, 0, None)  # KEYUP
+            _vk_cache[vk] = pair
+        return pair
+
     import pyautogui
-    import random
+
+    def press(ch):
+        vk = _VK.get(ch)
+        if vk is None:                      # 非数字键: 回退语义等同
+            pyautogui.press(ch)
+            return
+        pair = _key_pair(vk)
+        if user32.SendInput(2, pair, ctypes.sizeof(INPUT)) != 2:
+            raise RuntimeError(f"按键发送失败: {ch}")
+
+    def cleanup():
+        if timer_set:
+            try:
+                winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+
+    return click, press, cleanup
+
+
+def _pyautogui_click_press_env():
+    """pyautogui 点击+键入环境(非 Windows / 快速路径不可用时的回退)."""
+    import pyautogui
     pyautogui.PAUSE = 0.0
     pyautogui.MINIMUM_DURATION = 0.0
     pyautogui.MINIMUM_SLEEP = 0.0
 
+    def click(x, y):
+        pyautogui.click(int(x), int(y))     # 坐标瞬移点击(无移动动画)
+
+    def press(ch):
+        pyautogui.press(ch)
+
+    def cleanup():
+        pass
+
+    return click, press, cleanup
+
+
+def fill_board(solution, centers, given):
+    """点击+键入填数, 跳过初值格. 返回填入格数."""
+    import random
+    if IS_WINDOWS:
+        try:
+            click, press, cleanup = _win_click_press_env()
+        except Exception:
+            click, press, cleanup = _pyautogui_click_press_env()
+    else:
+        click, press, cleanup = _pyautogui_click_press_env()
+
     n = len(solution)
     filled = 0
-    for r in range(n):
-        for c in range(n):
-            if given[r][c]:
-                continue
-            cx, cy = centers[r][c]
-            jx = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
-            jy = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
-            tx, ty = int(round(cx + jx)), int(round(cy + jy))
-            # click 带坐标会瞬间定位(不播放平滑移动动画)并点击
-            pyautogui.click(tx, ty)
-            time.sleep(CONFIG["click_interval"])
-            pyautogui.press(str(solution[r][c]))
-            filled += 1
-            time.sleep(CONFIG["cell_delay"])
+    try:
+        for r in range(n):
+            for c in range(n):
+                if given[r][c]:
+                    continue
+                cx, cy = centers[r][c]
+                jx = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
+                jy = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
+                tx, ty = int(round(cx + jx)), int(round(cy + jy))
+                # click 带坐标会瞬间定位(不播放平滑移动动画)并点击
+                click(tx, ty)
+                time.sleep(CONFIG["click_interval"])
+                press(str(solution[r][c]))
+                filled += 1
+                time.sleep(CONFIG["cell_delay"])
+    finally:
+        cleanup()
     return filled
 
 
-# ======================================================================
 # 主流程
-# ======================================================================
 
 def run_pipeline(templates, bbox=None, img=None):
     """识别+求解+填数. bbox 为屏幕区域; 或直接给 img 做识别(不填数)."""
@@ -579,8 +683,25 @@ def verify_fill(templates, bbox, n, sol, given):
     return True, bad, miss
 
 
+def _boost_timer():
+    """把 Windows 系统定时器精度提到 1ms(退出时复原)。默认 15.6ms 粒度下
+    time.sleep(0.015) 实际会睡到 15.6~31ms, 逐格点击的毫秒级间隔形同虚设。
+    姊妹项目(马赛克/扫雷)实测结论。非 Windows 或失败时静默跳过。"""
+    import sys
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        if ctypes.windll.winmm.timeBeginPeriod(1) == 0:
+            import atexit
+            atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
+    except Exception:
+        pass
+
+
 def main():
     set_dpi_aware()
+    _boost_timer()
     templates = build_templates()
     print("[流程] 请在屏幕上拖动框选整个高楼棋盘(含四周提示)...")
     p0, p1 = select_region()

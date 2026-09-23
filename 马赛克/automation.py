@@ -84,8 +84,9 @@ def _physical_scaling():
         tk_w = root.winfo_screenwidth()
         tk_h = root.winfo_screenheight()
         with mss.MSS() as sct:
-            phys_w = sct.monitors[0]["width"]
-            phys_h = sct.monitors[0]["height"]
+            _mon = (sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0])
+            phys_w = _mon["width"]
+            phys_h = _mon["height"]
         sx = (phys_w / tk_w) if tk_w else 1.0
         sy = (phys_h / tk_h) if tk_h else 1.0
     except Exception:
@@ -263,14 +264,9 @@ def plan_clicks(puzzle, cells, bbox_origin):
 
 
 def _win_click_env():
-    """Windows ctypes 快速点击环境(独立分支, 非 Windows 不可达).
-
-    pyautogui 单次 click 开销 10~20ms(坐标规整/FAILSAFE 检查/平台封装),
-    千格作答时是作答时长的大头; SetCursorPos+SendInput 直发事件 <0.5ms,
-    瞬移语义相同(先定位光标再左键按下+释放, 无移动动画).
-    同时把系统定时器精度提到 1ms(winmm.timeBeginPeriod): 默认 15.6ms
-    精度下 time.sleep(0.012) 实际睡 ~15.6ms, 1226 格累计虚长 ~4s.
-    返回 (click(x,y), (screen_w, screen_h), cleanup).
+    """Windows ctypes 快速点击: SetCursorPos+SendInput 直发事件
+    (<0.5ms, 对比 pyautogui 每次 10~20ms 封装), 顺带把系统定时器提到
+    1ms 精度. 返回 (click, screen, cleanup).
     """
     import ctypes
 
@@ -340,9 +336,7 @@ def _pyautogui_click_env():
 def fill_answer(plan, cfg, stop=None, log=None):
     """按 plan 瞬移点击. 返回点击格数; stop 置位时抛 StopRequested.
 
-    键鼠安全约定不变: 瞬移定位+点击(无移动动画)、ESC 急停随时生效、
-    坐标越界即中止; Windows 快速路径没有 pyautogui 的左上角 FAILSAFE,
-    由 ESC 热键与越界检查兜底(键盘钩子独立于点击路径, 不受影响).
+    Windows 快速路径无 pyautogui 的左上角 FAILSAFE, 由 ESC 急停与越界检查兜底.
     """
     if IS_WINDOWS:
         click, screen, cleanup = _win_click_env()

@@ -109,9 +109,7 @@ def constraint_violations(board, result):
             for r, c in zip(rs, cs)]
 
 
-# ----------------------------------------------------------------------
 # 基础传播
-# ----------------------------------------------------------------------
 
 def basic_propagate(board, unknowns, status):
     """基础传播. status: 1=雷 -1=安全 0=未知. 返回是否变化."""
@@ -150,9 +148,7 @@ def basic_propagate(board, unknowns, status):
     return changed
 
 
-# ----------------------------------------------------------------------
 # 约束收集
-# ----------------------------------------------------------------------
 
 def _collect_constraints(board, unknowns, status):
     """收集边界约束: [(need, frozenset(未判未知格))]."""
@@ -262,9 +258,7 @@ def run_deduction(board, unknowns, status):
             changed = True
 
 
-# ----------------------------------------------------------------------
 # 组件分解
-# ----------------------------------------------------------------------
 
 def _decompose(constraints):
     """按共享格把约束分成连通组件."""
@@ -295,9 +289,7 @@ def _decompose(constraints):
     return comps
 
 
-# ----------------------------------------------------------------------
 # 完整枚举
-# ----------------------------------------------------------------------
 
 def _enumerate_component(comp, max_sols=20000, node_budget=80000000,
                          time_limit=5.0):
@@ -395,9 +387,7 @@ def _enumerate_component(comp, max_sols=20000, node_budget=80000000,
     return sols, exhausted
 
 
-# ----------------------------------------------------------------------
 # 传播反证兜底
-# ----------------------------------------------------------------------
 
 def _propagate_contradiction(comp, var_list, base, pending):
     """传播反证: 对每个待定格, 假设雷/安全, 传播看是否矛盾."""
@@ -416,9 +406,7 @@ def _propagate_contradiction(comp, var_list, base, pending):
     return mines, safes
 
 
-# ----------------------------------------------------------------------
 # 全棋盘精确整数约束
-# ----------------------------------------------------------------------
 
 def _solve_global_milp(board, time_limit=120.0, verbose=False):
     """用全棋盘 0/1 整数约束求解并证明唯一性.
@@ -443,7 +431,7 @@ def _solve_global_milp(board, time_limit=120.0, verbose=False):
         raise ValueError("扫雷棋盘必须是方阵")
     n = board.shape[0]
 
-    # ---- 用 numpy 一次性构造约束(替代逐格 Python 循环) ----
+    # 用 numpy 一次性构造约束(替代逐格 Python 循环)
     u_rows, u_cols = np.nonzero(board == UNOPENED)
     m = len(u_rows)
     cells = list(zip(u_rows.tolist(), u_cols.tolist()))
@@ -572,9 +560,7 @@ def _solve_global_milp(board, time_limit=120.0, verbose=False):
     return result
 
 
-# ----------------------------------------------------------------------
 # 主入口
-# ----------------------------------------------------------------------
 
 def solve_board(board, verbose=False,
                 max_solutions=50000, node_budget=300000000,

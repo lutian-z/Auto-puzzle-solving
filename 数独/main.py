@@ -60,7 +60,7 @@ class StopFlag:
 STOP = StopFlag()
 
 
-# ---------------------------------------------------------------- 屏幕与框选
+# 屏幕与框选
 
 def select_region():
     if IS_WINDOWS:
@@ -138,8 +138,9 @@ def _select_region_windows():
         tk_w = root.winfo_screenwidth()
         tk_h = root.winfo_screenheight()
         with mss.MSS() as _sct:
-            phys_w = _sct.monitors[0]["width"]
-            phys_h = _sct.monitors[0]["height"]
+            _mon = (_sct.monitors[1] if len(_sct.monitors) > 1 else _sct.monitors[0])
+            phys_w = _mon["width"]
+            phys_h = _mon["height"]
         sx = (phys_w / tk_w) if tk_w else 1.0
         sy = (phys_h / tk_h) if tk_h else 1.0
     except Exception:
@@ -222,7 +223,7 @@ def grab_screen(bbox):
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
-# ---------------------------------------------------------------- 网格定位
+# 网格定位
 
 def locate_grid(img):
     if img is None or img.size == 0:
@@ -470,7 +471,7 @@ def extract_grid(img, corners, size=720):
     return warped, M
 
 
-# ---------------------------------------------------------------- 网格线与区域
+# 网格线与区域
 
 def find_grid_lines(bw):
     h, w = bw.shape
@@ -657,11 +658,73 @@ def _valid_regions(regions, n):
     return len(regions) == n and all(len(reg) == n for reg in regions)
 
 
+def _edge_thickness_maps(bw, hy, vx):
+    """全部边厚度算一次(hth[r,c]: 行 r/r+1 间横线; vth[c,r]: 列 c/c+1 间竖线)。
+
+    -1 表示 detect_regions 中"区间退化被 continue"的边(不做合并)。
+    旧实现 detect_regions 每个候选 thin_max 都重新逐边测厚, 同一份
+    bw/hy/vx 要测 7~8 遍; 边厚与 thin_max 无关, 抽出一次即可。"""
+    n = len(hy) - 1
+    hth = np.full((max(n - 1, 0), max(n, 0)), -1, dtype=np.int64)
+    vth = np.full((max(n - 1, 0), max(n, 0)), -1, dtype=np.int64)
+    for r in range(n - 1):
+        y = hy[r + 1]
+        for c in range(n):
+            x0, x1 = vx[c] + 2, vx[c + 1] - 2
+            if x1 > x0:
+                hth[r, c] = _edge_thickness_h(bw, y, x0, x1)
+    for c in range(n - 1):
+        x = vx[c + 1]
+        for r in range(n):
+            y0, y1 = hy[r] + 2, hy[r + 1] - 2
+            if y1 > y0:
+                vth[c, r] = _edge_thickness_v(bw, x, y0, y1)
+    return hth, vth
+
+
+def _regions_from_maps(hth, vth, n, thin_max):
+    """与 detect_regions 完全同构(并查集/合并条件/分组顺序一致), 仅复用预计算边厚。"""
+    parent = {}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for r in range(n):
+        for c in range(n):
+            parent[(r, c)] = (r, c)
+
+    for r in range(n - 1):
+        for c in range(n):
+            th = int(hth[r, c])
+            if th >= 0 and (th == 0 or th <= thin_max):
+                union((r, c), (r + 1, c))
+    for c in range(n - 1):
+        for r in range(n):
+            th = int(vth[c, r])
+            if th >= 0 and (th == 0 or th <= thin_max):
+                union((r, c), (r, c + 1))
+
+    groups = defaultdict(list)
+    for r in range(n):
+        for c in range(n):
+            groups[find((r, c))].append((r, c))
+    return list(groups.values())
+
+
 def best_thin_max(bw, hy, vx):
     n = len(hy) - 1
     thicks = collect_edge_thicknesses(bw, hy, vx)
     if len(thicks) == 0:
         return 3, detect_regions(bw, hy, vx, 3)
+    hth, vth = _edge_thickness_maps(bw, hy, vx)
     med = float(np.median(thicks))
     otsu = _otsu_threshold(thicks)
     cands = sorted(set([
@@ -671,10 +734,10 @@ def best_thin_max(bw, hy, vx):
     for t in cands:
         if t <= 0:
             continue
-        regions = detect_regions(bw, hy, vx, t)
+        regions = _regions_from_maps(hth, vth, n, t)
         if _valid_regions(regions, n):
             return t, regions
-    return otsu, detect_regions(bw, hy, vx, otsu)
+    return otsu, _regions_from_maps(hth, vth, n, otsu)
 
 
 def detect_box_struct(grid_img):
@@ -806,7 +869,7 @@ def split_cells_irregular(grid_img, hy, vx):
     return [], 0
 
 
-# ---------------------------------------------------------------- 符号识别
+# 符号识别
 
 def decode_embedded_templates():
     import base64 as _b64
@@ -870,7 +933,9 @@ def _generate_system_templates():
         draw.text(((canvas - tw) / 2 - bbox[0], (canvas - th) / 2 - bbox[1]),
                   ch, fill=255, font=font)
         arr = np.array(img, dtype=np.uint8)
-        scale = (TEMPLATE_SIZE - 4) / max(arr.shape)
+        # 与内嵌模板(实测内容最大维度恒为 22)和 _cell_to_template(size-6)
+        # 三方统一; 旧值 -4(内容24)与运行时规则不一致, 每次匹配先天掉分。
+        scale = (TEMPLATE_SIZE - 6) / max(arr.shape)
         new_w = max(1, int(arr.shape[1] * scale))
         new_h = max(1, int(arr.shape[0] * scale))
         arr = cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_AREA)
@@ -929,6 +994,81 @@ def _cell_to_template(cell_bgr, size=28):
     x0 = (size - new_w) // 2
     canvas_img[y0:y0 + new_h, x0:x0 + new_w] = digit
     return canvas_img / 255.0
+
+
+def _cell_to_template_rel(cell_bgr, size=28):
+    """极性救援版模板提取: 格内区(中心 64%) + 对格体众数的偏离图 Otsu。
+
+    主路径的"墨迹=暗像素"隐含深字浅底极性; 浅灰数字/暗底亮字会整盘读空,
+    而读空不是安全失败——solve 会给空盘解出合法解并全盘填错(实测)。
+    本函数: 先裁内区把网格线(最亮/最暗的干扰源)挡在外面, 再以"偏离格体
+    众数"统一两种极性的笔画, Otsu 只需在 背景/字 两类间切。偏离 max<25
+    或前景占比>45% 判无数字; 组件按面积(>=15%最大块)保留、不做贴边剔除
+    (内区边界不是格线)。仅在"已知格低于护栏下限"时被调用, 常规盘不走。
+    """
+    gray = cv2.cvtColor(cell_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    y0, y1 = int(round(h * 0.18)), int(round(h * 0.82))
+    x0, x1 = int(round(w * 0.18)), int(round(w * 0.82))
+    inner = gray[y0:y1, x0:x1]
+    if inner.size < 25 or min(inner.shape) < 6:
+        return None
+    body = int(np.argmax(np.bincount(inner.ravel())))
+    diff = np.abs(inner.astype(np.int16) - body).astype(np.uint8)
+    if int(diff.max()) < 25:
+        return None
+    _, bw = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if float((bw > 0).mean()) > 0.45:
+        return None
+
+    ncc, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    if ncc <= 1:
+        return None
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    max_area = int(areas.max())
+    keep = np.where((areas >= max_area * 0.15) & (areas >= 4))[0] + 1
+    if len(keep) == 0:
+        return None
+    sel = np.isin(labels, keep).astype(np.uint8) * 255
+    ys, xs = np.where(sel > 0)
+    y_, x_ = ys.min(), xs.min()
+    ch, cw = ys.max() - y_ + 1, xs.max() - x_ + 1
+    if cw < 3 or ch < 3:
+        return None
+    digit = sel[y_:y_ + ch, x_:x_ + cw]
+    scale = (size - 6) / max(ch, cw)
+    new_w = max(1, int(round(cw * scale)))
+    new_h = max(1, int(round(ch * scale)))
+    digit = cv2.resize(digit, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    canvas_img = np.zeros((size, size), dtype=np.uint8)
+    ty = (size - new_h) // 2
+    tx = (size - new_w) // 2
+    canvas_img[ty:ty + new_h, tx:tx + new_w] = digit
+    return canvas_img / 255.0
+
+
+def recognize_cells_rel(cells, templates, n=9):
+    """极性救援识别: 与 recognize_cells 同判分/同置信闸, 仅模板提取不同。"""
+    board = np.zeros((n, n), dtype=int)
+    for idx, cell in enumerate(cells):
+        if cell is None or idx >= n * n:
+            continue
+        r, c = divmod(idx, n)
+        t = _cell_to_template_rel(cell)
+        if t is None:
+            continue
+        t = t.astype(np.float32)
+        best_i, best_v = 0, -1.0
+        for i2, ch in enumerate(SYMBOLS[:n], start=1):
+            if ch not in templates:
+                continue
+            res = cv2.matchTemplate(t, templates[ch], cv2.TM_CCOEFF_NORMED)
+            _, mv, _, _ = cv2.minMaxLoc(res)
+            if mv > best_v:
+                best_v, best_i = mv, i2
+        if best_v >= 0.5:      # 与主路径 _recognize_cell_scored 同一置信闸
+            board[r, c] = best_i
+    return board
 
 
 def _recognize_cell_scored(cell, templates, n=None):
@@ -1014,7 +1154,7 @@ def _bootstrap_recognize(cells, base_tpls, n):
     return board2
 
 
-# ---------------------------------------------------------------- 求解
+# 求解
 
 def solve_sudoku(board, regions):
     """通用求解器: 每行唯一 + 每列唯一 + 每个区域(宫格/不规则)唯一.
@@ -1243,7 +1383,7 @@ def _load_templates():
     return tpls
 
 
-# ---------------------------------------------------------------- 自动填入
+# 自动填入
 
 def compute_cell_centers(origin, grid_offset, grid_size, n=9):
     gx, gy = grid_offset
@@ -1259,40 +1399,147 @@ def compute_cell_centers(origin, grid_offset, grid_size, n=9):
     return centers
 
 
-def autofill_board(board, solution, centers):
-    n = board.shape[0]
-    filled = 0
-    empty_cells = [(r, c) for r in range(n) for c in range(n) if board[r, c] == 0]
+def _win_click_press_env():
+    """Windows ctypes 快速点击+键入(SetCursorPos+SendInput, <0.5ms/次,
+    对比 pyautogui 每次 10~20ms 封装), 定时器提到 1ms 精度.
+    press() 数字/字母按 VK 直发, 其余回退 pyautogui.press.
+    返回 (click, press, cleanup).
+    """
+    import ctypes
 
+    ULONG = ctypes.c_ulong
+    USHORT = ctypes.c_ushort
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                    ("mouseData", ULONG), ("dwFlags", ULONG),
+                    ("time", ULONG), ("dwExtraInfo", ctypes.c_void_p)]
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", USHORT), ("wScan", USHORT), ("dwFlags", ULONG),
+                    ("time", ULONG), ("dwExtraInfo", ctypes.c_void_p)]
+
+    class _U(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ULONG), ("u", _U)]
+
+    user32 = ctypes.windll.user32
+    winmm = ctypes.windll.winmm
+    timer_set = False
+    try:
+        timer_set = (winmm.timeBeginPeriod(1) == 0)
+    except Exception:
+        pass
+
+    minputs = (INPUT * 2)()
+    minputs[0].type = 0
+    minputs[0].u.mi = MOUSEINPUT(0, 0, 0, 0x0002, 0, None)     # LEFTDOWN
+    minputs[1].type = 0
+    minputs[1].u.mi = MOUSEINPUT(0, 0, 0, 0x0004, 0, None)     # LEFTUP
+
+    def click(x, y):
+        if not user32.SetCursorPos(int(x), int(y)):
+            raise RuntimeError(f"鼠标定位失败: ({x},{y})")
+        if user32.SendInput(2, minputs, ctypes.sizeof(INPUT)) != 2:
+            raise RuntimeError(f"鼠标事件发送失败: ({x},{y})")
+
+    _VK = {str(d): 0x30 + d for d in range(10)}
+    _VK.update({chr(ord('A') + i): 0x41 + i for i in range(26)})
+    _VK.update({chr(ord('a') + i): 0x41 + i for i in range(26)})
+    _vk_cache = {}
+
+    def _key_pair(vk):
+        pair = _vk_cache.get(vk)
+        if pair is None:
+            pair = (INPUT * 2)()
+            pair[0].type = 1                                   # INPUT_KEYBOARD
+            pair[0].u.ki = KEYBDINPUT(vk, 0, 0, 0, None)       # KEYDOWN
+            pair[1].type = 1
+            pair[1].u.ki = KEYBDINPUT(vk, 0, 0x0002, 0, None)  # KEYUP
+            _vk_cache[vk] = pair
+        return pair
+
+    def press(ch):
+        vk = _VK.get(ch) if len(ch) == 1 else None
+        if vk is None:                      # 多字符/特殊符号: 回退等价路径
+            pyautogui.press(ch)
+            return
+        pair = _key_pair(vk)
+        if user32.SendInput(2, pair, ctypes.sizeof(INPUT)) != 2:
+            raise RuntimeError(f"按键发送失败: {ch}")
+
+    def cleanup():
+        if timer_set:
+            try:
+                winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+
+    return click, press, cleanup
+
+
+def _pyautogui_click_press_env():
+    """pyautogui 点击+键入环境(非 Windows / 快速路径不可用时的回退)."""
     pyautogui.PAUSE = 0.0
     pyautogui.MINIMUM_DURATION = 0.0
     pyautogui.MINIMUM_SLEEP = 0.0
 
-    for r, c in empty_cells:
-        if STOP.stopped:
-            print(f"[中断] 已填入 {filled} 格, 剩余 {len(empty_cells) - filled} 格未填")
-            break
-        cx, cy = centers[r, c]
+    def click(x, y):
+        pyautogui.click(int(x), int(y))
 
-        jx = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
-        jy = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
-        target_x, target_y = int(round(cx + jx)), int(round(cy + jy))
+    def press(ch):
+        pyautogui.press(ch)
 
-        # click 带坐标会瞬间定位(不播放平滑移动动画)并点击
-        pyautogui.click(target_x, target_y)
-        time.sleep(CONFIG["click_interval"])
+    def cleanup():
+        pass
 
-        val = solution[r, c]
-        ch = SYMBOLS[val - 1] if 1 <= val <= len(SYMBOLS) else str(val)
-        pyautogui.press(ch)   # 单键直发, 比 typewrite 逐字符快
-        filled += 1
+    return click, press, cleanup
 
-        time.sleep(CONFIG["cell_delay"])
+
+def autofill_board(board, solution, centers):
+    """按空格序列点击+键入; Windows 走快速路径, 其余回退 pyautogui."""
+    n = board.shape[0]
+    filled = 0
+    empty_cells = [(r, c) for r in range(n) for c in range(n) if board[r, c] == 0]
+
+    if IS_WINDOWS:
+        try:
+            click, press, cleanup = _win_click_press_env()
+        except Exception:
+            click, press, cleanup = _pyautogui_click_press_env()
+    else:
+        click, press, cleanup = _pyautogui_click_press_env()
+
+    try:
+        for r, c in empty_cells:
+            if STOP.stopped:
+                print(f"[中断] 已填入 {filled} 格, 剩余 {len(empty_cells) - filled} 格未填")
+                break
+            cx, cy = centers[r, c]
+
+            jx = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
+            jy = random.uniform(-CONFIG["jitter"], CONFIG["jitter"])
+            target_x, target_y = int(round(cx + jx)), int(round(cy + jy))
+
+            # click 带坐标会瞬间定位(不播放平滑移动动画)并点击
+            click(target_x, target_y)
+            time.sleep(CONFIG["click_interval"])
+
+            val = solution[r, c]
+            ch = SYMBOLS[val - 1] if 1 <= val <= len(SYMBOLS) else str(val)
+            press(ch)   # 单键直发, 比 typewrite 逐字符快
+            filled += 1
+
+            time.sleep(CONFIG["cell_delay"])
+    finally:
+        cleanup()
 
     return filled
 
 
-# ---------------------------------------------------------------- 主流程
+# 主流程
 
 def process_candidate(shot_img, corners, tpls):
     """处理一个候选网格: 矫正 -> 找线 -> 推断尺寸 -> 区域检测 -> 识别.
@@ -1396,7 +1643,12 @@ def run_pipeline(origin, shot_img):
         for row in board:
             print("  " + " ".join(str(x) for x in row))
 
-        solution = solve_sudoku(board, regions)
+        solution = None
+        if res["n_known"] >= _min_known(n):
+            solution = solve_sudoku(board, regions)
+        else:
+            print(f"[护栏] 已知格 {res['n_known']} 低于下限 {_min_known(n)}, "
+                  "不做盲解, 转入精修/救援链")
 
         if solution is None:
             print("[提示] 首轮识别可能不准, 尝试自举精修...")
@@ -1419,6 +1671,26 @@ def run_pipeline(origin, shot_img):
                 if solution is not None:
                     board = repaired
 
+        if solution is None and res["n_known"] < _min_known(n):
+            print("[救援] 已知格过少, 尝试少数类极性重读(浅灰字/暗底亮字)...")
+            try:
+                board_rel = recognize_cells_rel(cells, tpls, n)
+            except Exception:
+                board_rel = None
+            if board_rel is not None and int((board_rel > 0).sum()) > res["n_known"]:
+                cand_sol = solve_sudoku(board_rel, regions)
+                if cand_sol is not None:
+                    print(f"[救援] 极性重读得到 {int((board_rel > 0).sum())} "
+                          "个已知格并成功求解, 采用救援结果")
+                    board, solution = board_rel, cand_sol
+
+        if solution is not None:
+            known_final = int((np.asarray(board) > 0).sum())
+            if known_final < _min_known(n):
+                print(f"[护栏] 题面已知格仅 {known_final} 个(下限 {_min_known(n)}), "
+                      "疑似整盘未被读出; 拒绝作答, 不回填(请重新框选/检查字体)")
+                solution = None
+
         if solution is not None:
             x_coords = corners[:, 0]
             y_coords = corners[:, 1]
@@ -1440,7 +1712,32 @@ def run_pipeline(origin, shot_img):
     return None, None, None
 
 
+def _min_known(n):
+    """可作答的最少已知格下限: 低于此数几乎必是"整盘没读出来"。
+    数独唯一解最少 17 提示(9x9), 各尺寸按 0.9n 取下限是极保守的安全网;
+    真正的灾难路径是 n_known≈0 时 solve 仍会返回一个合法解并被全盘
+    填入(实测), 这里必须拦住。"""
+    return max(5, int(n * 0.9))
+
+
+def _boost_timer():
+    """把 Windows 系统定时器精度提到 1ms(退出时复原)。默认 15.6ms 粒度下
+    time.sleep(0.015) 实际会睡到 15.6~31ms, 逐格点击的毫秒级间隔形同虚设。
+    姊妹项目(马赛克/扫雷)实测结论。非 Windows 或失败时静默跳过。"""
+    import sys
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        if ctypes.windll.winmm.timeBeginPeriod(1) == 0:
+            import atexit
+            atexit.register(ctypes.windll.winmm.timeEndPeriod, 1)
+    except Exception:
+        pass
+
+
 def main():
+    _boost_timer()
     if IS_WINDOWS:
         try:
             import ctypes
